@@ -158,22 +158,54 @@ def clasificar(df):
     X, y = X.loc[datos_ok], y.loc[datos_ok]
     if y.nunique() < 2:
         raise ValueError('Las reglas generaron menos de dos categorías para entrenar.')
-    if (y.value_counts() < 3).any():
-        raise ValueError('Hay categorías con menos de 3 ejemplos. Se necesita suficiente información para separar el 80/20 y aplicar SMOTE.')
-
-    # En el notebook original: train/test 80/20, stratify, random_state=0.
-    x_train, _, y_train, _ = train_test_split(
-        X, y, test_size=0.2, random_state=0, stratify=y
+ 
+# Verificar que existan al menos dos categorías
+if y.nunique() < 2:
+    raise ValueError(
+        "Se necesitan al menos dos categorías para entrenar."
     )
-    le = LabelEncoder()
-    y_train_encoded = le.fit_transform(y_train)
-    cuentas = pd.Series(y_train_encoded).value_counts()
-    if cuentas.min() < 2:
-        raise ValueError('Hay categorías con muy pocos registros en entrenamiento para aplicar SMOTE.')
-    vecinos = min(5, int(cuentas.min()) - 1)
-    x_train_smote, y_train_smote = SMOTE(
-        random_state=0, k_neighbors=vecinos
-    ).fit_resample(x_train, y_train_encoded)
+
+# Codificar variable objetivo
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+X_modelo = X
+y_modelo = y_encoded
+
+# Revisar cantidad de registros por categoría
+frecuencias = pd.Series(y_encoded).value_counts()
+
+# Solo aplicar SMOTE a categorías con al menos 2 registros
+clases_smote = frecuencias[frecuencias >= 2]
+
+if len(clases_smote) > 0:
+
+    objetivo = min(int(frecuencias.max()), 1000)
+
+    estrategia = {
+        int(clase): objetivo
+        for clase, cantidad in clases_smote.items()
+        if cantidad < objetivo
+    }
+
+    if estrategia:
+
+        vecinos = min(
+            5,
+            int(clases_smote.min()) - 1
+        )
+
+        smote = SMOTE(
+            sampling_strategy=estrategia,
+            random_state=0,
+            k_neighbors=vecinos
+        )
+
+        X_modelo, y_modelo = smote.fit_resample(
+            X,
+            y_encoded
+        )
+
 
     # Los parámetros de estos cinco modelos se recuperaron de los outputs
     # de RandomizedSearchCV en el notebook proporcionado.
@@ -201,8 +233,7 @@ def clasificar(df):
             ('svm', svm), ('nb', nb), ('dt', dt)
         ], voting='soft', n_jobs=1
     )
-    ensamble.fit(x_train_smote, y_train_smote)
-
+ensamble.fit(X_modelo, y_modelo)
     todas = df[FEATURES].apply(pd.to_numeric, errors='coerce')
     predecibles = todas.notna().all(axis=1)
     df['Categoría reclasificada'] = pd.NA
