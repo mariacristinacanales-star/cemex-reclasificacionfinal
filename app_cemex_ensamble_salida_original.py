@@ -1,96 +1,128 @@
-"""CEMEX: limpieza (notebook 1), outliers + transformación (notebook 2),
-clasificación por ensamble Soft Voting de seis modelos (notebook _5modelos_CEMEX). Los parámetros optimizados se tomaron de los outputs guardados. No es un modelo preentrenado.
-"""
-import io
-import hashlib
-import re
-import unicodedata
-import numpy as np
-import pandas as pd
-import streamlit as st
-from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import make_pipeline
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
-from sklearn.naive_bayes import GaussianNB
-from sklearn.tree import DecisionTreeClassifier
-from xgboost import XGBClassifier
-from imblearn.over_sampling import SMOTE
-
-st.set_page_config(page_title='Reclasificación CEMEX', page_icon='📄')
-st.title('Reclasificación automática de costos CEMEX – By UDEM')
-st.write('Carga el archivo .xlsx de un mes de registros de costos de “Otros” de transporte propio descargado de SAP y obtén la reclasificación de los registros.')
-
-FEATURES = [
-    'Denom.clase de coste_num', 'Cl.coste_num',
-    'Costo Estandar_num', 'Descrip.clases coste_num'
-]
-ENCODINGS = [
-    'Segmento', 'Cl.coste', 'Denom.clase de coste', 'Denom.obj.',
-    'Descrip.clases coste', 'Usuario', 'Cl.doc', 'Clasificación',
-    'Jerarquía FOP', 'Nombre UO', 'Plaza', 'Costo Estandar',
-    'Zona', 'Cia', 'Llave', 'Tipo de registro', 'Categoría de costo'
-]
-REQUIRED = [
-    'Actual', 'Denom.obj.', 'Descrip.clases coste', 'Nº doc.',
-    'Usuario', 'Nombre UO', 'Plaza', 'Cl.doc', 'Denom.obj.interl.',
-    'Material', '    Ctd.reg.', 'UM', 'Costo Estandar',
-    'Denom.clase de coste', 'Cl.coste', 'Jerarquía FOP'
-]
-DROPS_1 = [
-    'Database OG ', 'Texto doc.', 'Ref.anul.', 'Nº pers.', 'Año',
-    'Fecha contable', 'MonT', 'Doc.compr.', 'Texto de pedido',
-    'Ord. partner', 'Denominación', 'Texto breve de material'
-]
 
 
-def contains(df, col, pattern):
-    return df[col].astype('string').str.contains(pattern, case=False, na=False, regex=True)
+# Reconoce diferencias inocuas de escritura sin confundir columnas diferentes.
+# No inventa datos ni rellena columnas faltantes.
+ALIASES = {
+    'Denom.obj.': ['Denom obj', 'Denom.obj', 'Denominación objeto',
+                   'Denominacion objeto', 'Denominación del objeto'],
+    '    Ctd.reg.': ['Ctd.reg.', 'Ctd reg', 'Ctd.reg',
+                       'Cantidad registrada', 'Cantidad registro'],
+    'Nº doc.': ['N° doc.', 'Nº doc', 'No doc', 'Número de documento'],
+    'Costo Estandar': ['Costo Estándar'],
+}
 
 
-def etiquetar_segun_reglas(df):
-    """Mismo orden y precedencia de las celdas 62 a 71 del notebook 1."""
-    df['Categoría de costo'] = pd.Series(pd.NA, index=df.index, dtype='object')
-    def set_cat(condition, name):
-        df.loc[condition, 'Categoría de costo'] = name
-
-    set_cat(df['Denom.clase de coste'].isin([
-        '5604 MATERIAS PRIMAS','5605 SUMINISTROS PRO','5610 REVENTA DE PROD'
-    ]), 'Materiales y materias primas')
-    set_cat(contains(df,'Descrip.clases coste',r'Aditivos|Agregado|Cemento|Material|Papeleria|Papelería|Oficina'), 'Materiales y materias primas')
-    set_cat(contains(df,'Costo Estandar',r'Elem Seg') | contains(df,'Descrip.clases coste',r'segur'), 'Elementos de seguridad')
-    set_cat(df['Denom.clase de coste'].isin(['5681 COMBUSTIBLES','5603 ENERGETICOS','5602 ENERGIA ELECTR.']), 'Combustibles y energía')
-    set_cat(contains(df,'Costo Estandar',r'Gasolina|Combustible|Diesel|Energia|Energía'), 'Combustibles y energía')
-    set_cat(contains(df,'Descrip.clases coste',r'Diesel'), 'Combustibles y energía')
-    set_cat(df['Denom.clase de coste'].isin(['5619 MANTENIMIENTO','5619 MAINTENANCE']), 'Mantenimiento y gastos operativos')
-    set_cat(contains(df,'Costo Estandar',r'Mtto|Mantenimiento'), 'Mantenimiento y gastos operativos')
-    set_cat(contains(df,'Descrip.clases coste',r'Cambio de Inventarios|Gastos Complementarios Mineros'), 'Mantenimiento y gastos operativos')
-    set_cat(df['Denom.clase de coste'].isin(['5689 EQPS/SERVS.TELE','5673 SERVICIOS','5617 OTROS SERVICIOS','5688 EQPO.COMPUTO/SW']), 'Servicios y tecnología')
-    set_cat(contains(df,'Descrip.clases coste',r'GPS|telecom|celular|software|comput'), 'Servicios y tecnología')
-    set_cat(df['Denom.clase de coste'].isin([
-        '5630 SLDOS./SALARIOS','5630 OTS.SUELDOS/SAL','5630 OTS.PRESTAC.SOC',
-        '5630 SEGURIDAD SOCIA','5630 INDEMNIZACIONES','5630 PREST.NO.GARANT',
-        '5672 HONOR.PERS.NATU','5671 HONOR.PERS.JURI'
-    ]), 'Personal y prestaciones')
-    set_cat(contains(df,'Costo Estandar',r'Sueldos|Personal'), 'Personal y prestaciones')
-    set_cat(df['Denom.clase de coste'].eq('5676 GASTOS DE VIAJE'), 'Viajes y movilidad')
-    set_cat(contains(df,'Costo Estandar',r'Gastos de Viaje'), 'Viajes y movilidad')
-    set_cat(contains(df,'Descrip.clases coste',
-        r'Diversos|Cafeteria|Cafetería|Comisiones y Regalias|Reuniones de Trabajo|Aseo y Limpieza|'
-        r'Relac. Publicas|Relac. Públicas|Festejos y Regalos|Stand Eventos y Convenciones|'
-        r'Afiliaciones|Gastos Legales|Articulos Promocionales|Suscripciones y Publicaciones|'
-        r'Indemnizaciones por Calidad|Alimentos y Gastos Zootecnia'),
-        'Gastos administrativos y generales')
-    set_cat(df['Denom.clase de coste'].isin(['5678 SEGUROS/FIANZAS','5679 IMPUESTOS']), 'Seguros, impuestos y permisos')
-    set_cat(contains(df,'Descrip.clases coste',r'Tramites y Licencias|Trámites y Licencias|Multas y actualiz.de impuestos'), 'Seguros, impuestos y permisos')
-    set_cat(df['Denom.clase de coste'].isin([
-        '5675 ARRENDAMIENTOS','5675 INTERCO ARREND','5683 AMORTIZACION',
-        '5683 AMORTIZATION','5683 PC-AMORTIZATION','5684 PROVISIONES'
-    ]), 'Arrendamientos, amortizaciones y provisiones')
-    set_cat(contains(df,'Costo Estandar',r'Leasing|Alq|Amort|Provision|Provisión'), 'Arrendamientos, amortizaciones y provisiones')
-    return df
+def normalizar_nombre(nombre):
+    nombre = unicodedata.normalize('NFKD', str(nombre))
+    nombre = ''.join(c for c in nombre if not unicodedata.combining(c))
+    return re.sub(r'[^a-z0-9]+', '', nombre.casefold())
 
 
+def detectar_columnas(df):
+    # Solo se asigna automáticamente si hay una coincidencia única.
+    existentes = list(df.columns)
+    usados = set()
+    renombrar = {}
+    for canonico in REQUIRED:
+        if canonico in existentes:
+            usados.add(canonico)
+            continue
+        variantes = [canonico] + ALIASES.get(canonico, [])
+        claves = {normalizar_nombre(v) for v in variantes}
+        encontrados = [c for c in existentes
+                       if c not in usados and normalizar_nombre(c) in claves]
+        if len(encontrados) == 1:
+            renombrar[encontrados[0]] = canonico
+            usados.add(encontrados[0])
+    return renombrar
+
+
+# Los datos del modelo se procesan en una copia; la descarga preserva el Excel original.
+st.subheader('Sube tu Excel original (.xlsx)')
+archivo = st.file_uploader('Upload: Sube tu Excel original (.xlsx)', type=['xlsx'])
+
+if archivo is not None:
+    try:
+        raw = archivo.getvalue()
+        input_id = hashlib.sha256(raw).hexdigest()
+        original = pd.read_excel(io.BytesIO(raw))
+        if st.session_state.get('input_id') != input_id or 'conteos' not in st.session_state:
+            st.write(f'Cantidad de registros base original: **{len(original):,}**')
+
+        # Reiniciar resultados anteriores cuando el usuario suba otro Excel.
+        if st.session_state.get('input_id') != input_id:
+            st.session_state.pop('xlsx_reclasificado', None)
+            st.session_state.pop('conteos', None)
+
+        renombres = detectar_columnas(original)
+        pendientes = [c for c in REQUIRED
+                      if c not in original.columns and c not in renombres.values()]
+        opciones_usadas = set(renombres) | {c for c in REQUIRED if c in original.columns}
+        manual = {}
+        if pendientes:
+            # Solo mostrar opciones adicionales cuando la equivalencia sea ambigua.
+            with st.expander('Relacionar columnas faltantes', expanded=True):
+                for canonico in pendientes:
+                    disponibles = ['— Seleccionar columna —'] + [
+                        str(c) for c in original.columns if c not in opciones_usadas
+                    ]
+                    elegido = st.selectbox(
+                        f'¿Qué columna corresponde a «{canonico}»?',
+                        disponibles, key='map_' + canonico
+                    )
+                    if elegido != '— Seleccionar columna —':
+                        manual[elegido] = canonico
+                        opciones_usadas.add(elegido)
+        faltan = [c for c in REQUIRED
+                  if c not in original.columns
+                  and c not in renombres.values()
+                  and c not in manual.values()]
+
+        if st.button('Reclasificar', type='primary', disabled=bool(faltan)):
+            st.session_state.pop('xlsx_reclasificado', None)
+            st.session_state.pop('conteos', None)
+            try:
+                with st.spinner('Limpiando, transformando y aplicando el modelo de ensamble...'):
+                    # Se renombran columnas SOLO para preparar las variables del modelo.
+                    preparado = original.rename(columns={**renombres, **manual})
+                    limpio = limpiar(preparado)
+                    transformado = transformar(limpio)
+                    clasificado = clasificar(transformado)
+
+                    # La salida sale de la base ORIGINAL, no de la transformada.
+                    resultado_excel = original.copy()
+                    if 'Reclasificación' in resultado_excel.columns:
+                        raise ValueError('El Excel ya contiene una columna llamada Reclasificación. Renómbrala antes de procesar para no sobrescribir datos.')
+                    resultado_excel['Reclasificación'] = pd.Series(
+                        pd.NA, index=resultado_excel.index, dtype='object'
+                    )
+                    preds = clasificado['Categoría reclasificada'].dropna()
+                    resultado_excel.loc[preds.index, 'Reclasificación'] = preds.to_numpy()
+
+                    cantidad_clasificada = int(resultado_excel['Reclasificación'].notna().sum())
+                    cantidad_sin_clasificar = len(resultado_excel) - cantidad_clasificada
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl',
+                                        datetime_format='YYYY-MM-DD HH:MM:SS',
+                                        date_format='YYYY-MM-DD') as writer:
+                        resultado_excel.to_excel(writer, sheet_name='Base reclasificada', index=False)
+                    st.session_state['xlsx_reclasificado'] = buffer.getvalue()
+                    st.session_state['conteos'] = (
+                        len(resultado_excel), cantidad_sin_clasificar, cantidad_clasificada
+                    )
+                    st.session_state['input_id'] = input_id
+            except Exception as err:
+                st.error(f'No se pudo reclasificar el archivo: {err}')
+
+        if st.session_state.get('input_id') == input_id and 'conteos' in st.session_state:
+            total, sin_clasificar, reclasificados = st.session_state['conteos']
+            st.write(f'Cantidad de registros base original: **{total:,}**')
+            st.write(f'Cantidad de registros sin reclasificar: **{sin_clasificar:,}**')
+            st.write(f'Cantidad de registros reclasificados (predicciones): **{reclasificados:,}**')
+            st.write('Archivo clasificado. Descarga el .xlsx')
+            st.download_button(
+                'Descargar base reclasificada .xlsx',
+                data=st.session_state['xlsx_reclasificado'],
+                file_name='CEMEX_base_reclasificada.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                type='primary'
