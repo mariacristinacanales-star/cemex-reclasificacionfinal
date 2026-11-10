@@ -233,7 +233,7 @@ if len(clases_smote) > 0:
             ('svm', svm), ('nb', nb), ('dt', dt)
         ], voting='soft', n_jobs=1
     )
-ensamble.fit(X_modelo, y_modelo)
+    ensamble.fit(X_modelo, y_modelo)
     todas = df[FEATURES].apply(pd.to_numeric, errors='coerce')
     predecibles = todas.notna().all(axis=1)
     df['Categoría reclasificada'] = pd.NA
